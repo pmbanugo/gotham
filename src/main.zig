@@ -9,6 +9,8 @@ const usockets = @cImport({
     @cInclude("libusockets.h");
 });
 
+const log = std.log.scoped(.gotham);
+
 // We're not using SSL for this example
 const SSL = 1;
 
@@ -53,7 +55,7 @@ fn onHttpSocketWritable(socket: ?*usockets.us_socket_t) callconv(.C) ?*usockets.
 fn onHttpSocketClose(socket: ?*usockets.us_socket_t, code: i32, reason: ?*anyopaque) callconv(.C) ?*usockets.us_socket_t {
     _ = code;
     _ = reason;
-    std.log.info("Client disconnected", .{});
+    log.debug("Client disconnected", .{});
     return socket;
 }
 
@@ -95,7 +97,7 @@ fn onHttpSocketOpen(socket: ?*usockets.us_socket_t, is_client: i32, ip: [*c]u8, 
     // Timeout idle HTTP connections
     usockets.us_socket_timeout(SSL, socket, 30);
 
-    std.log.info("Client connected", .{});
+    log.debug("Client connected", .{});
 
     return socket;
 }
@@ -127,7 +129,7 @@ pub fn main() !void {
 
     const http_context = usockets.us_create_socket_context(SSL, loop, @sizeOf(HttpContext), options);
     if (http_context == null) {
-        std.log.err("Could not create socket context", .{});
+        log.err("Could not create socket context", .{});
         return;
     }
 
@@ -154,10 +156,10 @@ pub fn main() !void {
     const listen_socket = usockets.us_socket_context_listen(SSL, http_context, null, 3000, 0, @sizeOf(HttpSocket));
 
     if (listen_socket != null) {
-        std.log.info("Listening on localhost:3000...", .{});
+        log.info("Listening on localhost:3000...", .{});
         usockets.us_loop_run(loop);
     } else {
-        std.log.err("Failed to listen on port 3000!", .{});
+        log.err("Failed to listen on port 3000!", .{});
     }
 
     // Cleanup
