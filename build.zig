@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
         },
         .flags = &.{
             "-std=c11",
-            "-fno-sanitize=undefined", //TODO: uSockets may have some undefined behavior
+            "-fno-sanitize=address",
         },
     });
 
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
             "src/crypto/sni_tree.cpp",
         },
         .flags = &.{
-            "-fno-sanitize=undefined", //TODO: uSockets may have some undefined behavior
+            "-fno-sanitize=address",
         },
     });
 
