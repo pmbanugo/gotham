@@ -21,23 +21,96 @@ const HTTP_RESPONSE_ENDED: u8 = 1 << 3;
 const HTTP_CONNECTION_CLOSE: u8 = 1 << 4;
 const HTTP_CHUNKED_ENCODING: u8 = 1 << 5;
 
+const CORK_BUFFER_SIZE: u16 = 16 * 1024;
+
+// Loop data for corking (I need to figure out a better name for this)
+const LoopData = struct {
+    cork_buffer: [CORK_BUFFER_SIZE]u8 = undefined,
+    cork_offset: u16 = 0,
+    corked_socket: ?*usockets.us_socket_t = null,
+
+    fn getCorkBuffer(self: *LoopData, bytes: u16) ?[]u8 {
+        if (self.cork_offset + bytes <= CORK_BUFFER_SIZE) {
+            const start = self.cork_offset;
+            self.cork_offset += bytes;
+            return self.cork_buffer[start..self.cork_offset];
+        }
+        return null;
+    }
+
+    fn flushCork(self: *LoopData) void {
+        if (self.corked_socket != null and self.cork_offset > 0) {
+            _ = usockets.us_socket_write(SSL, self.corked_socket, &self.cork_buffer[0], @intCast(self.cork_offset), 0);
+            self.cork_offset = 0;
+        }
+    }
+
+    fn uncork(self: *LoopData, socket: *usockets.us_socket_t) void {
+        if (self.corked_socket == socket) {
+            self.flushCork();
+            self.corked_socket = null;
+        }
+    }
+
+    fn cork(self: *LoopData, socket: *usockets.us_socket_t) void {
+        if (self.corked_socket != socket) {
+            self.flushCork(); // Flush any previous socket
+            self.corked_socket = socket;
+            self.cork_offset = 0;
+        }
+    }
+};
+
+// Get loop data from us_loop_t
+fn getLoopData(loop: *usockets.us_loop_t) *LoopData {
+    return @ptrCast(@alignCast(usockets.us_loop_ext(loop)));
+}
+
 const HttpResponse = struct {
     socket: *usockets.us_socket_t,
     state: u8 = 0, // state with bit flags
     status_code: u16 = 200,
-    header_buffer: std.ArrayList(u8),
     allocator: std.mem.Allocator,
 
     pub fn create(allocator: std.mem.Allocator, socket: *usockets.us_socket_t) HttpResponse {
-        // Pre-allocate reasonable header buffer size to avoid reallocations
-        const header_buffer = std.ArrayList(u8).initCapacity(allocator, 1024) catch
-            std.ArrayList(u8).init(allocator);
-
         return HttpResponse{
             .socket = socket,
-            .header_buffer = header_buffer,
             .allocator = allocator,
         };
+    }
+
+    // Cork this socket and execute handler, then uncork
+    pub fn cork(self: *HttpResponse, handler: *const fn (*HttpResponse) void) void {
+        const socket_context = usockets.us_socket_context(SSL, self.socket);
+        const loop = usockets.us_socket_context_loop(SSL, socket_context);
+        const loop_data = getLoopData(loop.?);
+
+        loop_data.cork(self.socket);
+        handler(self);
+        loop_data.uncork(self.socket);
+    }
+
+    // Efficient write - tries cork buffer first, then direct syscall
+    fn writeEfficiently(self: *HttpResponse, data: []const u8) bool {
+        if (data.len == 0) return true;
+
+        const socket_context = usockets.us_socket_context(SSL, self.socket);
+        const loop = usockets.us_socket_context_loop(SSL, socket_context);
+        const loop_data = getLoopData(loop.?);
+
+        // If this socket is corked, try to use cork buffer
+        if (loop_data.corked_socket == self.socket) {
+            if (loop_data.getCorkBuffer(@intCast(data.len))) |buffer| {
+                @memcpy(buffer[0..data.len], data);
+                return true; // Successfully buffered
+            }
+            // Cork buffer full, flush and continue to direct write
+            loop_data.flushCork();
+        }
+
+        // Direct syscall
+        const result = usockets.us_socket_write(SSL, self.socket, data.ptr, @intCast(data.len), 0);
+        return result != 0; // Return false if write would block (future backpressure handling)
     }
 
     pub fn writeStatus(self: *HttpResponse, code: u16) *HttpResponse {
@@ -46,7 +119,11 @@ const HttpResponse = struct {
         self.status_code = code;
         const status_text = getStatusText(code);
 
-        self.header_buffer.writer().print("HTTP/1.1 {d} {s}\r\n", .{ code, status_text }) catch return self;
+        // Build status line directly and write via efficient write
+        var status_buffer: [128]u8 = undefined;
+        const status_line = std.fmt.bufPrint(&status_buffer, "HTTP/1.1 {d} {s}\r\n", .{ code, status_text }) catch return self;
+
+        _ = self.writeEfficiently(status_line);
         self.state |= HTTP_STATUS_WRITTEN;
 
         return self;
@@ -59,16 +136,19 @@ const HttpResponse = struct {
             _ = self.writeStatus(200);
         }
 
-        self.header_buffer.writer().print("{s}: {s}\r\n", .{ name, value }) catch return self;
+        // Build header line directly and write via efficient write
+        var header_buffer: [512]u8 = undefined;
+        const header_line = std.fmt.bufPrint(&header_buffer, "{s}: {s}\r\n", .{ name, value }) catch return self;
+
+        _ = self.writeEfficiently(header_line);
 
         return self;
     }
 
-    fn flushHeaders(self: *HttpResponse) void {
-        if ((self.state & HTTP_HEADERS_WRITTEN) == 0 and self.header_buffer.items.len > 0) {
-            // Add final CRLF to end headers section
-            self.header_buffer.writer().writeAll("\r\n") catch return;
-            _ = usockets.us_socket_write(SSL, self.socket, self.header_buffer.items.ptr, @intCast(self.header_buffer.items.len), 0);
+    fn endHeaders(self: *HttpResponse) void {
+        if ((self.state & HTTP_HEADERS_WRITTEN) == 0) {
+            // Write final CRLF to end headers section
+            _ = self.writeEfficiently("\r\n");
             self.state |= HTTP_HEADERS_WRITTEN;
         }
     } // Enter or continue chunked encoding mode. Writes part of the response.
@@ -81,13 +161,13 @@ const HttpResponse = struct {
         if ((self.state & HTTP_BODY_STARTED) == 0) {
             // First write - close headers and start chunked encoding
             _ = self.writeHeader("Transfer-Encoding", "chunked");
-            self.flushHeaders(); // Single syscall for all headers
+            self.endHeaders(); // End headers section
             self.state |= HTTP_BODY_STARTED | HTTP_CHUNKED_ENCODING;
         }
 
         // Handle zero-length write (end chunked encoding)
         if (data.len == 0 and (self.state & HTTP_CHUNKED_ENCODING) != 0) {
-            _ = usockets.us_socket_write(SSL, self.socket, "0\r\n\r\n", 5, 0);
+            _ = self.writeEfficiently("0\r\n\r\n");
             self.state |= HTTP_RESPONSE_ENDED;
             return true;
         }
@@ -97,27 +177,14 @@ const HttpResponse = struct {
             var chunk_header: [32]u8 = undefined;
             const chunk_size_str = std.fmt.bufPrint(&chunk_header, "{X}\r\n", .{data.len}) catch return false;
 
-            // Use stack buffer with @memcpy for optimal performance
-            var data_with_trailer: []u8 = undefined;
-            var stack_buffer: [4104]u8 = undefined; // Stack buffer for 4KB chunks + trailer (8-byte aligned). For future, I could consider using a larger buffer if needed (4-8KB?).
+            // Write chunk header
+            _ = self.writeEfficiently(chunk_size_str);
 
-            if (data.len + 2 <= stack_buffer.len) {
-                // Fast path: use stack buffer with @memcpy
-                @memcpy(stack_buffer[0..data.len], data);
-                @memcpy(stack_buffer[data.len .. data.len + 2], "\r\n");
-                data_with_trailer = stack_buffer[0 .. data.len + 2];
-            } else {
-                // Fallback: heap allocation for large chunks
-                var heap_buffer = self.allocator.alloc(u8, data.len + 2) catch return false;
-                defer self.allocator.free(heap_buffer);
-                @memcpy(heap_buffer[0..data.len], data);
-                @memcpy(heap_buffer[data.len .. data.len + 2], "\r\n");
-                data_with_trailer = heap_buffer;
-            }
+            // Write chunk data
+            _ = self.writeEfficiently(data);
 
-            // Single syscall: chunk header + (data + trailer)
-            // TODO: When SSL support is added, use separate us_socket_write() calls since us_socket_write2() is non-SSL only
-            _ = usockets.us_socket_write2(SSL, self.socket, chunk_size_str.ptr, @intCast(chunk_size_str.len), data_with_trailer.ptr, @intCast(data_with_trailer.len));
+            // Write chunk trailer
+            _ = self.writeEfficiently("\r\n");
         }
 
         // For now, always return true (no backpressure handling yet)
@@ -133,12 +200,14 @@ const HttpResponse = struct {
                     _ = self.writeStatus(200);
                 }
 
-                // Build content-length header
-                self.header_buffer.writer().print("Content-Length: {d}\r\n\r\n", .{data.len}) catch return;
+                // Build content-length header and write CRLF to end headers
+                var content_length_buffer: [64]u8 = undefined;
+                const content_length_header = std.fmt.bufPrint(&content_length_buffer, "Content-Length: {d}\r\n\r\n", .{data.len}) catch return;
 
-                // Use us_socket_write2() for optimal header+body write - single syscall!
-                // TODO: When SSL support is added, use separate us_socket_write() calls since us_socket_write2() is non-SSL only
-                _ = usockets.us_socket_write2(SSL, self.socket, self.header_buffer.items.ptr, @intCast(self.header_buffer.items.len), data.ptr, @intCast(data.len));
+                _ = self.writeEfficiently(content_length_header);
+                _ = self.writeEfficiently(data);
+
+                self.state |= HTTP_HEADERS_WRITTEN | HTTP_BODY_STARTED;
             } else {
                 // Final chunk in chunked encoding
                 _ = try self.write(data);
@@ -147,15 +216,13 @@ const HttpResponse = struct {
         } else {
             if ((self.state & HTTP_CHUNKED_ENCODING) != 0) {
                 // Terminating chunk only
-                _ = usockets.us_socket_write(SSL, self.socket, "0\r\n\r\n", 5, 0);
+                _ = self.writeEfficiently("0\r\n\r\n");
             } else if ((self.state & HTTP_BODY_STARTED) == 0) {
                 // Headers only response - ensure we have status line
                 if ((self.state & HTTP_STATUS_WRITTEN) == 0) {
                     _ = self.writeStatus(200);
                 }
-                self.header_buffer.writer().writeAll("\r\n") catch return;
-                _ = usockets.us_socket_write(SSL, self.socket, self.header_buffer.items.ptr, @intCast(self.header_buffer.items.len), 0);
-                self.state |= HTTP_HEADERS_WRITTEN;
+                self.endHeaders();
             }
         }
 
@@ -247,14 +314,22 @@ fn onHttpSocketData(socket: ?*usockets.us_socket_t, data: [*c]u8, length: i32) c
     // Create response with arena allocator
     var response = HttpResponse.create(arena_allocator, socket.?);
 
-    //TODO: Build dynamic response - this is where user code would go
-    _ = response.writeStatus(200);
-    _ = response.writeHeader("Content-Type", "text/plain");
-    _ = response.writeHeader("Server", "Gotham/0.1");
+    // Handler function for corked response
+    const handleRequest = struct {
+        fn handle(res: *HttpResponse) void {
+            //TODO: Build dynamic response - this is where user code would go
+            _ = res.writeStatus(200);
+            _ = res.writeHeader("Content-Type", "text/plain");
+            _ = res.writeHeader("Server", "Gotham/0.1");
 
-    response.end("Hello from Dynamic Gotham Server!") catch |err| {
-        log.err("Failed to send response: {}", .{err});
-    };
+            res.end("Hello from Gotham Server!") catch |err| {
+                log.err("Failed to send response: {}", .{err});
+            };
+        }
+    }.handle;
+
+    // Cork socket for optimal batching
+    response.cork(handleRequest);
 
     // Reset idle timer (30 seconds)
     usockets.us_socket_timeout(SSL, socket, 30);
@@ -290,9 +365,17 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create the event loop
-    const loop = usockets.us_create_loop(null, onWakeup, onPre, onPost, 0);
+    // Create the event loop with LoopData for corking
+    const loop = usockets.us_create_loop(null, onWakeup, onPre, onPost, @sizeOf(LoopData));
+    if (loop == null) {
+        log.err("Could not create event loop", .{});
+        return;
+    }
     defer usockets.us_loop_free(loop);
+
+    // Initialize loop data for corking
+    const loop_data = getLoopData(loop.?);
+    loop_data.* = LoopData{};
 
     // Create a socket context for HTTP (no SSL)
     const options = usockets.us_socket_context_options_t{
