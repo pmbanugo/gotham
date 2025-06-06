@@ -249,7 +249,6 @@ const HttpResponse = struct {
 
 // HTTP socket extension data
 const HttpSocket = struct {
-    offset: i32 = 0,
     response: ?*HttpResponse = null, // TODO: Use for queued writes in backpressure handling
 };
 
@@ -330,11 +329,6 @@ fn onHttpSocketOpen(socket: ?*usockets.us_socket_t, is_client: i32, ip: [*c]u8, 
     _ = is_client;
     _ = ip;
     _ = ip_length;
-
-    const http_socket: *HttpSocket = @ptrCast(@alignCast(usockets.us_socket_ext(SSL, socket)));
-
-    // Reset offset
-    http_socket.offset = 0;
 
     // Timeout idle HTTP connections
     usockets.us_socket_timeout(SSL, socket, 30);
