@@ -66,10 +66,114 @@ fn getLoopData(loop: *usockets.us_loop_t) *LoopData {
     return @ptrCast(@alignCast(usockets.us_loop_ext(loop)));
 }
 
+// HTTP Status enum optimized for HTTP/1.1+ (no reason phrases)
+const HttpStatus = enum(u8) {
+    // 1xx Informational
+    continue_status,
+    switching_protocols,
+    processing,
+    early_hints,
+
+    // 2xx Success
+    ok,
+    created,
+    accepted,
+    non_authoritative_information,
+    no_content,
+    reset_content,
+    partial_content,
+    multi_status,
+    already_reported,
+    im_used,
+
+    // 3xx Redirection
+    multiple_choices,
+    moved_permanently,
+    found,
+    see_other,
+    not_modified,
+    temporary_redirect,
+    permanent_redirect,
+
+    // 4xx Client Error
+    bad_request,
+    unauthorized,
+    payment_required,
+    forbidden,
+    not_found,
+    method_not_allowed,
+    not_acceptable,
+    proxy_authentication_required,
+    request_timeout,
+    conflict,
+    gone,
+    length_required,
+    precondition_failed,
+    payload_too_large,
+    uri_too_long,
+    unsupported_media_type,
+    range_not_satisfiable,
+    expectation_failed,
+    im_a_teapot,
+    misdirected_request,
+    unprocessable_entity,
+    locked,
+    failed_dependency,
+    too_early,
+    upgrade_required,
+    precondition_required,
+    too_many_requests,
+    request_header_fields_too_large,
+    unavailable_for_legal_reasons,
+
+    // 5xx Server Error
+    internal_server_error,
+    not_implemented,
+    bad_gateway,
+    service_unavailable,
+    gateway_timeout,
+    http_version_not_supported,
+    variant_also_negotiates,
+    insufficient_storage,
+    loop_detected,
+    not_extended,
+    network_authentication_required,
+
+    const codes = [_]u16{
+        // 1xx Informational
+        100, 101, 102, 103,
+        // 2xx Success
+        200, 201, 202, 203,
+        204, 205, 206, 207,
+        208, 226,
+        // 3xx Redirection
+        300, 301,
+        302, 303, 304, 307,
+        308,
+        // 4xx Client Error
+        400, 401, 402,
+        403, 404, 405, 406,
+        407, 408, 409, 410,
+        411, 412, 413, 414,
+        415, 416, 417, 418,
+        421, 422, 423, 424,
+        425, 426, 428, 429,
+        431, 451,
+        // 5xx Server Error
+        500, 501,
+        502, 503, 504, 505,
+        506, 507, 508, 510,
+        511,
+    };
+
+    pub inline fn toCode(self: HttpStatus) u16 {
+        return codes[@intFromEnum(self)];
+    }
+};
+
 const HttpResponse = struct {
     socket: *usockets.us_socket_t,
     state: u8 = 0, // state with bit flags
-    status_code: u16 = 200,
 
     pub fn create(socket: *usockets.us_socket_t) HttpResponse {
         return HttpResponse{
@@ -111,15 +215,15 @@ const HttpResponse = struct {
         return result != 0; // Return false if write would block (future backpressure handling)
     }
 
-    pub fn writeStatus(self: *HttpResponse, code: u16) *HttpResponse {
+    pub fn writeStatus(self: *HttpResponse, status: HttpStatus) *HttpResponse {
         if ((self.state & HTTP_STATUS_WRITTEN) != 0 or (self.state & HTTP_RESPONSE_ENDED) != 0) return self;
 
-        self.status_code = code;
-        const status_text = getStatusText(code);
+        const code = status.toCode();
 
-        // Build status line directly and write via efficient write
-        var status_buffer: [128]u8 = undefined;
-        const status_line = std.fmt.bufPrint(&status_buffer, "HTTP/1.1 {d} {s}\r\n", .{ code, status_text }) catch return self;
+        var status_buffer: [16]u8 = undefined; // Format: "HTTP/1.1 {code}\r\n" = 9 + 3 + 2 = 14 bytes max
+
+        // Build status line directly - HTTP/1.1 allows omitting reason phrase, and HTTP/2 omits it entirely
+        const status_line = std.fmt.bufPrint(&status_buffer, "HTTP/1.1 {d}\r\n", .{code}) catch return self;
 
         _ = self.writeEfficiently(status_line);
         self.state |= HTTP_STATUS_WRITTEN;
@@ -131,7 +235,7 @@ const HttpResponse = struct {
         if ((self.state & HTTP_HEADERS_WRITTEN) != 0 or (self.state & HTTP_RESPONSE_ENDED) != 0) return self;
 
         if ((self.state & HTTP_STATUS_WRITTEN) == 0) {
-            _ = self.writeStatus(200);
+            _ = self.writeStatus(.ok);
         }
 
         // Build header line directly and write via efficient write
@@ -195,7 +299,7 @@ const HttpResponse = struct {
             if ((self.state & HTTP_BODY_STARTED) == 0) {
                 // Ensure status is written and add content-length
                 if ((self.state & HTTP_STATUS_WRITTEN) == 0) {
-                    _ = self.writeStatus(200);
+                    _ = self.writeStatus(.ok);
                 }
 
                 // Build content-length header and write CRLF to end headers
@@ -218,7 +322,7 @@ const HttpResponse = struct {
             } else if ((self.state & HTTP_BODY_STARTED) == 0) {
                 // Headers only response - ensure we have status line
                 if ((self.state & HTTP_STATUS_WRITTEN) == 0) {
-                    _ = self.writeStatus(200);
+                    _ = self.writeStatus(.ok);
                 }
                 self.endHeaders();
             }
@@ -233,18 +337,6 @@ const HttpResponse = struct {
     //     // Return false if would block, queue data for later
     //     return false;
     // }
-
-    //TODO: this is incomplete and needs to be reworked and expanded to support more status codes
-    fn getStatusText(code: u16) []const u8 {
-        return switch (code) {
-            200 => "OK",
-            201 => "Created",
-            400 => "Bad Request",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            else => "Unknown",
-        };
-    }
 };
 
 // HTTP socket extension data
@@ -306,7 +398,7 @@ fn onHttpSocketData(socket: ?*usockets.us_socket_t, data: [*c]u8, length: i32) c
     const handleRequest = struct {
         fn handle(res: *HttpResponse) void {
             //TODO: Build dynamic response - this is where user code would go
-            _ = res.writeStatus(200);
+            _ = res.writeStatus(.ok);
             _ = res.writeHeader("Content-Type", "text/plain");
             _ = res.writeHeader("Server", "Gotham/0.1");
 
