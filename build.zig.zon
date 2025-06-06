@@ -70,6 +70,10 @@
             .url = "git+https://github.com/uNetworking/uSockets?ref=master#182b7e4fe7211f98682772be3df89c71dc4884fa",
             .hash = "N-V-__8AAKIGBgCLiFypEaoU5xQrAgbWVkeCaRYNcpGG7u5K",
         },
+        .picohttpparser = .{
+            .url = "git+https://github.com/allyourcodebase/picohttpparser?ref=master#e3960b6658f38ecb7bdc59be0cd653a8d311e891",
+            .hash = "picohttpparser-0.0.0-r0YzO5UNAAD8WbIv--3soE3YqO1ctxNozYsPokF_3_oT",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.

@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // [Lib] Get picohttpparser dependency
+    const picohttpparser = b.dependency("picohttpparser", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Build options for uSockets
     const use_ssl = b.option(bool, "ssl", "Enable SSL support") orelse false;
     const ssl_backend = b.option(enum { openssl, wolfssl }, "ssl-backend", "SSL backend to use") orelse .openssl;
@@ -156,6 +162,9 @@ pub fn build(b: *std.Build) void {
     // Link uSockets to the library
     lib.linkLibrary(usockets_lib);
     lib.addIncludePath(usockets_dep.path("src"));
+    // Add picohttpparser to the library
+    lib.addIncludePath(picohttpparser.path("."));
+    lib.linkLibrary(picohttpparser.artifact("picohttpparser"));
 
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
@@ -172,6 +181,9 @@ pub fn build(b: *std.Build) void {
     // Link uSockets to the executable
     exe.linkLibrary(usockets_lib);
     exe.addIncludePath(usockets_dep.path("src"));
+    // Add picohttpparser to the executable
+    exe.addIncludePath(picohttpparser.path("."));
+    exe.linkLibrary(picohttpparser.artifact("picohttpparser"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
