@@ -70,12 +70,10 @@ const HttpResponse = struct {
     socket: *usockets.us_socket_t,
     state: u8 = 0, // state with bit flags
     status_code: u16 = 200,
-    allocator: std.mem.Allocator,
 
-    pub fn create(allocator: std.mem.Allocator, socket: *usockets.us_socket_t) HttpResponse {
+    pub fn create(socket: *usockets.us_socket_t) HttpResponse {
         return HttpResponse{
             .socket = socket,
-            .allocator = allocator,
         };
     }
 
@@ -302,17 +300,8 @@ fn onHttpSocketData(socket: ?*usockets.us_socket_t, data: [*c]u8, length: i32) c
     _ = data;
     _ = length;
 
-    const socket_context = usockets.us_socket_context(SSL, socket);
-    const http_context: *HttpContext = @ptrCast(@alignCast(usockets.us_socket_context_ext(SSL, socket_context)));
-
-    // Use ArenaAllocator for this request - all allocations freed at once
-    var arena = std.heap.ArenaAllocator.init(http_context.allocator);
-    defer arena.deinit(); // Single cleanup for entire request!
-
-    const arena_allocator = arena.allocator();
-
-    // Create response with arena allocator
-    var response = HttpResponse.create(arena_allocator, socket.?);
+    // Create response directly
+    var response = HttpResponse.create(socket.?);
 
     // Handler function for corked response
     const handleRequest = struct {
