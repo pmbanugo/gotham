@@ -255,7 +255,7 @@ const HttpSocket = struct {
 
 // HTTP context extension data
 const HttpContext = struct {
-    allocator: std.mem.Allocator, // Changed from pre-built response to allocator
+    allocator: std.mem.Allocator, //I've changed a lot of code and I need to revisit this and determine if it's still used.
 };
 
 // Event loop callbacks (empty implementations for now)
