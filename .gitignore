@@ -1,6 +1,7 @@
 zig-out/
 .zig-cache/
 *.o
+.DS_Store
 
 # personal
 backup/
