@@ -7,6 +7,7 @@ const lib = @import("gotham_lib");
 const usockets = @cImport({
     @cInclude("libusockets.h");
 });
+const parser = @import("parser.zig");
 
 const log = std.log.scoped(.gotham);
 
@@ -171,6 +172,29 @@ const HttpStatus = enum(u8) {
     }
 };
 
+// Define the request handler callback type
+/// Callback for handling HTTP requests.
+/// The `arena_allocator` is an ArenaAllocator tied to the lifecycle of this specific request.
+/// Memory allocated with it will be automatically freed after the handler returns.
+const HttpRequestHandler = *const fn (arena_allocator: std.mem.Allocator, request: *const parser.HttpRequest, response: *HttpResponse) void;
+
+// Default request handler, useful for debugging and as a fallback
+/// This is the default request handler that will be used if no user-defined handler is set.
+fn defaultRequestHandler(arena_allocator: std.mem.Allocator, request: *const parser.HttpRequest, response: *HttpResponse) void {
+    _ = arena_allocator; // Allocator might be used for dynamic responses
+    _ = request; // Request is not used in this default handler
+
+    _ = response.writeStatus(.ok);
+    _ = response.writeHeader("Content-Type", "text/plain");
+    _ = response.writeHeader("Server", "Gotham/0.1");
+    response.end("Hello via default handler!") catch |err| {
+        log.err("Failed to send response in default handler: {}", .{err});
+    };
+}
+
+// Global variable to hold the user-provided request handler
+var userRequestHandler: HttpRequestHandler = defaultRequestHandler;
+
 const HttpResponse = struct {
     socket: *usockets.us_socket_t,
     state: u8 = 0, // state with bit flags
@@ -253,10 +277,8 @@ const HttpResponse = struct {
             _ = self.writeEfficiently("\r\n");
             self.state |= HTTP_HEADERS_WRITTEN;
         }
-    } // Enter or continue chunked encoding mode. Writes part of the response.
-    // End with zero length write. Returns true if no backpressure was added.
-    // TODO: Add backpressure handling - should queue remainder for writable callback
-    // TODO: When write() returns false, data should be queued and sent in onHttpSocketWritable
+    }
+
     pub fn write(self: *HttpResponse, data: []const u8) !bool {
         if ((self.state & HTTP_RESPONSE_ENDED) != 0) return false; // Response already ended
 
@@ -291,7 +313,8 @@ const HttpResponse = struct {
 
         // For now, always return true (no backpressure handling yet)
         return true;
-    } // Complete response with optional final data
+    }
+
     pub fn end(self: *HttpResponse, data: []const u8) !void {
         if ((self.state & HTTP_RESPONSE_ENDED) != 0) return; // Already ended, ignore
 
@@ -346,7 +369,7 @@ const HttpSocket = struct {
 
 // HTTP context extension data
 const HttpContext = struct {
-    allocator: std.mem.Allocator, //I've changed a lot of code and I need to revisit this and determine if it's still used.
+    backing_allocator: std.mem.Allocator,
 };
 
 // Event loop callbacks (empty implementations for now)
@@ -387,29 +410,71 @@ fn onHttpSocketEnd(socket: ?*usockets.us_socket_t) callconv(.C) ?*usockets.us_so
     return usockets.us_socket_close(SSL, socket, 0, null);
 }
 
-fn onHttpSocketData(socket: ?*usockets.us_socket_t, data: [*c]u8, length: i32) callconv(.C) ?*usockets.us_socket_t {
-    _ = data;
-    _ = length;
+fn onHttpSocketData(socket: ?*usockets.us_socket_t, data_ptr: [*c]u8, length: c_int) callconv(.C) ?*usockets.us_socket_t {
+    const http_context_ext: *HttpContext = @ptrCast(@alignCast(usockets.us_socket_context_ext(SSL, usockets.us_socket_context(SSL, socket.?))));
+    const backing_allocator = http_context_ext.backing_allocator;
 
-    // Create response directly
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    // Create response object early for use in error reporting too
     var response = HttpResponse.create(socket.?);
 
-    // Handler function for corked response
-    const handleRequest = struct {
-        fn handle(res: *HttpResponse) void {
-            //TODO: Build dynamic response - this is where user code would go
-            _ = res.writeStatus(.ok);
-            _ = res.writeHeader("Content-Type", "text/plain");
-            _ = res.writeHeader("Server", "Gotham/0.1");
+    // Get LoopData for manual corking/uncorking
+    const socket_context = usockets.us_socket_context(SSL, response.socket);
+    const loop = usockets.us_socket_context_loop(SSL, socket_context);
+    const loop_data = getLoopData(loop.?);
 
-            res.end("Hello from Gotham Server!") catch |err| {
-                log.err("Failed to send response: {}", .{err});
-            };
+    var http_request: parser.HttpRequest = undefined;
+
+    // TODO: Implement proper handling for previous_buffer_len for requests spanning multiple data events.
+    // For now, assuming each data event is a new/complete header set or an error.
+    // Ensure length is non-negative; c_int can be negative on error from underlying layers, though unlikely here.
+    const data_len: usize = @intCast(length);
+    const parse_result = parser.parseRequest(&http_request, data_ptr[0..data_len], 0);
+
+    if (parse_result) |consumed_bytes| {
+        _ = consumed_bytes; // consumed_bytes might be used later for body processing
+        // Successfully parsed the request
+        loop_data.cork(response.socket);
+        userRequestHandler(arena_allocator, &http_request, &response); // Call the user-defined handler
+        loop_data.uncork(response.socket);
+    } else |parse_err| {
+        // Handle parsing errors by sending an HTTP error response
+        log.warn("Request parsing failed: {}", .{parse_err});
+        loop_data.cork(response.socket); // Cork for error response
+
+        switch (parse_err) {
+            error.PartialRequest => {
+                _ = response.writeStatus(.bad_request);
+                response.end("400 Bad Request - Partial request data") catch |e| {
+                    log.err("Failed to send 400 error (PartialRequest): {}", .{e});
+                };
+            },
+            error.ParserError => {
+                _ = response.writeStatus(.bad_request);
+                response.end("400 Bad Request - Malformed HTTP request") catch |e| {
+                    log.err("Failed to send 400 error (ParserError): {}", .{e});
+                };
+            },
+            error.OutOfMemory => {
+                // This error is critical, might not be able to send a response if allocator failed.
+                _ = response.writeStatus(.internal_server_error);
+                response.end("500 Internal Server Error - Out of memory") catch |e| {
+                    log.err("Failed to send 500 error (OutOfMemory): {}", .{e});
+                };
+                // Consider closing the connection directly if response sending also fails.
+            },
+            error.TooManyHeaders => {
+                _ = response.writeStatus(.payload_too_large); // HTTP 413
+                response.end("413 Payload Too Large - Too many headers") catch |e| {
+                    log.err("Failed to send 413 error (TooManyHeaders): {}", .{e});
+                };
+            },
         }
-    }.handle;
-
-    // Cork socket for optimal batching
-    response.cork(handleRequest);
+        loop_data.uncork(response.socket);
+    }
 
     // Reset idle timer (30 seconds)
     usockets.us_socket_timeout(SSL, socket, 30);
@@ -470,7 +535,7 @@ pub fn main() !void {
     }
 
     const http_context_ext: *HttpContext = @ptrCast(@alignCast(usockets.us_socket_context_ext(SSL, http_context)));
-    http_context_ext.allocator = allocator;
+    http_context_ext.backing_allocator = allocator;
 
     // Set up event handlers
     usockets.us_socket_context_on_open(SSL, http_context, onHttpSocketOpen);
