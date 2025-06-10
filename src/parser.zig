@@ -22,7 +22,7 @@ pub const HttpRequest = struct {
     _embedded_header_storage: [MAX_HEADERS]Header, // Fixed Array to hold parsed headers. This way we don't have to allocate memory dynamically.... but.... is there a better alternative that avoids heap allocation?
     headers: []Header, // Slice pointing into _embedded_header_storage
 
-    /// Helper function to get the value of the first header with the given name.
+    /// Function to get the value of the first header with the given name.
     /// Performs a case-insensitive comparison for the header name.
     pub fn getHeader(self: HttpRequest, comptime name_to_find: []const u8) ?[]const u8 {
         for (self.headers) |header| {
