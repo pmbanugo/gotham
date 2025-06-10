@@ -182,7 +182,7 @@ const HttpRequestHandler = *const fn (arena_allocator: std.mem.Allocator, reques
 /// This is the default request handler that will be used if no user-defined handler is set.
 fn defaultRequestHandler(arena_allocator: std.mem.Allocator, request: *const parser.HttpRequest, response: *HttpResponse) void {
     _ = arena_allocator; // Allocator might be used for dynamic responses
-    _ = request; // Request is not used in this default handler
+    _ = request;
 
     _ = response.writeStatus(.ok);
     _ = response.writeHeader("Content-Type", "text/plain");
