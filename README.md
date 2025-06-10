@@ -55,12 +55,12 @@ fn defaultRequestHandler(arena_allocator: std.mem.Allocator, request: *const par
 }
 ```
 
-Then, run the server again and make a request to see the new response.
+Then, run the server (`zig build -Doptimize=ReleaseFast run`) and make a request to see the new response.
 
 ## FAQ
 
 - **How fast is it?**
-  - The exact performance depends on your usage. On my M1 MacBook Pro (16GB), it can handle around 122,503 requests per second with `Hello via default handler!` response (measured with `oha -z 20s --no-tui http://localhost:3000`). Those will likely change as I work on adding more features and optimizations.
+  - The exact performance depends on your usage. On my M1 MacBook Pro (16GB), it can handle around 122,503 requests per second with `Hello via default handler!` response (measured with `zig build -Doptimize=ReleaseFast` and `oha -z 20s --no-tui http://localhost:3000`). Those will likely change as I work on adding more features and optimizations.
 - **Is it production-ready?**
   - Not yet. While it is functional for hobby projects, it requires more testing, optimizations, and features before it can be considered production-ready.
 - **Can I contribute?**
