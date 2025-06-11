@@ -114,14 +114,12 @@ pub fn parseRequest(
 }
 
 test "parse simple GET request" {
-    const allocator = std.testing.allocator;
-    var request_instance = try allocator.create(HttpRequest);
-    defer allocator.destroy(request_instance);
+    var request_instance: HttpRequest = undefined;
 
     const request_data = "GET /hello HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test\r\n\r\n";
     const buffer = request_data;
 
-    const consumed_bytes = try parseRequest(request_instance, buffer, 0);
+    const consumed_bytes = try parseRequest(&request_instance, buffer, 0);
 
     try std.testing.expectEqualSlices(u8, "GET", request_instance.method);
     try std.testing.expectEqualSlices(u8, "/hello", request_instance.path);
@@ -153,16 +151,14 @@ test "parse simple GET request" {
 }
 
 test "parse POST request with body" {
-    const allocator = std.testing.allocator;
-    var request_instance = try allocator.create(HttpRequest);
-    defer allocator.destroy(request_instance);
+    var request_instance: HttpRequest = undefined;
 
     const request_body_content = "{\"key\": \"value\"}";
 
     const request_data = "POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"key\": \"value\"}";
     const buffer = request_data;
 
-    const consumed_bytes = try parseRequest(request_instance, buffer, 0);
+    const consumed_bytes = try parseRequest(&request_instance, buffer, 0);
 
     try std.testing.expectEqualSlices(u8, "POST", request_instance.method);
     try std.testing.expectEqualSlices(u8, "/submit", request_instance.path);
@@ -181,7 +177,7 @@ test "parse POST request with body" {
 
 test "parse partial request" {
     const allocator = std.testing.allocator;
-    const request_instance = try allocator.create(HttpRequest); // Still need an instance to pass
+    const request_instance: HttpRequest = undefined;
     defer allocator.destroy(request_instance);
 
     const partial_request_data = "GET /partial HT"; // Incomplete
@@ -193,7 +189,7 @@ test "parse partial request" {
 
 test "parse error request" {
     const allocator = std.testing.allocator;
-    const request_instance = try allocator.create(HttpRequest); // Still need an instance to pass
+    const request_instance: HttpRequest = undefined;
     defer allocator.destroy(request_instance);
 
     const error_request_data = "GET /error\nInvalid\n"; // Invalid HTTP
