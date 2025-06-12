@@ -1,7 +1,4 @@
-// Consider using a single cImport in the project, as mentioned in https://ziglang.org/documentation/master/#cImport. I tried doing that in a c_import.zig and reusing that in other files, but it didn't work. So for now, we will use a cImport here.
-const c = @cImport({
-    @cInclude("picohttpparser.h");
-});
+const c = @import("c_import.zig").c;
 
 const std = @import("std");
 

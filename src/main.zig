@@ -4,9 +4,7 @@
 const std = @import("std");
 /// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
 const lib = @import("gotham_lib");
-const usockets = @cImport({
-    @cInclude("libusockets.h");
-});
+const usockets = @import("c_import.zig").c;
 const parser = @import("parser.zig");
 
 const log = std.log.scoped(.gotham);
