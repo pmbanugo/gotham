@@ -2,6 +2,33 @@ const c = @import("c_import.zig").c;
 
 const std = @import("std");
 
+// const HttpMethod = enum {
+//     GET,
+//     POST,
+//     PUT,
+//     DELETE,
+//     PATCH,
+//     HEAD,
+//     OPTIONS,
+//     CONNECT,
+//     TRACE,
+
+//     pub fn fromString(method: []const u8) !HttpMethod {
+//         const method_map = std.StaticStringMap(HttpMethod).initComptime(.{
+//             .{ "GET", .GET },
+//             .{ "POST", .POST },
+//             .{ "PUT", .PUT },
+//             .{ "DELETE", .DELETE },
+//             .{ "PATCH", .PATCH },
+//             .{ "HEAD", .HEAD },
+//             .{ "OPTIONS", .OPTIONS },
+//             .{ "CONNECT", .CONNECT },
+//             .{ "TRACE", .TRACE },
+//         });
+//         return method_map.get(method) orelse error.InvalidMethod;
+//     }
+// };
+
 /// Represents a single HTTP header.
 /// The name and value slices point directly into the original request buffer.
 pub const Header = struct {
