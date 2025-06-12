@@ -50,6 +50,7 @@ pub const HttpRequest = struct {
     /// Function to get the value of the first header with the given name.
     /// Performs a case-insensitive comparison for the header name.
     pub fn getHeader(self: HttpRequest, name_to_find: []const u8) ?[]const u8 {
+        // TODO: This is likely slow when headers are large. Consider other options (e.g. a hash map or bloom filter) for faster lookups.
         for (self.headers) |header| {
             if (std.ascii.eqlIgnoreCase(header.name, name_to_find)) {
                 return header.value;
